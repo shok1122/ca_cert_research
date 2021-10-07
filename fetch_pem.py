@@ -1,9 +1,11 @@
+import json
 import psycopg2
 import sys
 import time
 
 import requests
 from requests.auth import HTTPBasicAuth
+from requests.exceptions import RequestException
 
 # 引数
 psql_table_name = sys.argv[1]
@@ -34,7 +36,37 @@ def get_fingerprint_list(_cur, _table):
 
     return fingerprint_list
 
-def fetch_cert(_fingerprint_sha256):
+def bulk_fetch_cert(_fingerprint_list):
+
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    data = {
+        'fingerprints': _fingerprint_list
+    }
+    json_data = json.dumps(data)
+    resp = requests.post(
+        endpoint + f"/api/v1/bulk/certificates",
+        headers = headers,
+        data = json_data,
+        auth = HTTPBasicAuth(censys_api_id, censys_api_secret)
+    )
+    try:
+        resp.raise_for_status()
+    except RequestException as e:
+        print(json_data)
+        print(e.response.text)
+        return None, True
+
+    resp_dict = json.loads(resp.text)
+
+    fetch_cert_list = {}
+    for fp, v in resp_dict.items():
+        fetch_cert_list[fp] = v['raw']
+
+    return fetch_cert_list, False
+
+def fetch_cert1(_fingerprint_sha256):
 
     resp = requests.get(endpoint + f"/certificates/{_fingerprint_sha256}/pem/raw", auth=HTTPBasicAuth(censys_api_id, censys_api_secret))
 
@@ -64,7 +96,7 @@ def update_db(_conn, _cur, _table, _cert_list):
     _cur.execute(query)
     _conn.commit()
 
-def formatPem(_pem_before):
+def format_pem(_pem_before):
     num = 64
     tmp = []
     for i in range(num):
@@ -84,26 +116,48 @@ def formatPem(_pem_before):
 with get_connection() as conn:
     with conn.cursor() as cur:
 
-        fingerprint_list = get_fingerprint_list(cur, psql_table_name)
+        fingerprint_list_all = get_fingerprint_list(cur, psql_table_name)
 
         cert_list = []
         i = 0
-        for fp in fingerprint_list:
-            while True:
-                pem, retry = fetch_cert(fp)
-                if not retry:
-                    break
-                time.sleep(100)
-            time.sleep(6)
-            cert_list.append((fp, pem))
-            i += 1
-            if batch_size <= i:
-                update_db(conn, cur, psql_table_name, cert_list)
-                i = 0
-                cert_list.clear()
+        while True:
+            # get 50 certificates from list
+            fingerprint_list = fingerprint_list_all[:50]
+            fingerprint_list_all = fingerprint_list_all[50:]
 
-        if i > 0:
+            pem_dict, retry = bulk_fetch_cert(fingerprint_list)
+
+            while retry:
+                print("Retry")
+                time.sleep(10)
+                pem_dict, retry = bulk_fetch_cert(fingerprint_list)
+
+            for fp, pem in pem_dict.items():
+                print(fp)
+                cert_list.append((fp, format_pem(pem)))
+
             update_db(conn, cur, psql_table_name, cert_list)
-            i = 0
-            cert_list.clear()
+
+            if len(fingerprint_list_all) <= 0:
+                break
+
+
+#        for fp in fingerprint_list:
+#            while True:
+#                pem, retry = fetch_cert1(fp)
+#                if not retry:
+#                    break
+#                time.sleep(100)
+#            time.sleep(6)
+#            cert_list.append((fp, pem))
+#            i += 1
+#            if batch_size <= i:
+#                update_db(conn, cur, psql_table_name, cert_list)
+#                i = 0
+#                cert_list.clear()
+#
+#        if i > 0:
+#            update_db(conn, cur, psql_table_name, cert_list)
+#            i = 0
+#            cert_list.clear()
 
