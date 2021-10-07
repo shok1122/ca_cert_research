@@ -1,18 +1,18 @@
 # doc: https://googleapis.dev/python/bigquerystorage/latest/index.html
 
+import datetime
+import sys
+import threading
+
 import psycopg2
 from psycopg2 import extras
-
-import sys
-
-import threading
 
 from google.cloud.bigquery_storage import BigQueryReadClient
 from google.cloud.bigquery_storage import types
 
 # 引数
 bq_table_name = sys.argv[1]
-psql_table_name = sys.argv[2]
+year = sys.argv[2]
 
 argc = len(sys.argv) - 1
 if argc != 2:
@@ -40,11 +40,15 @@ def get_connection():
     return psycopg2.connect(dsn)
 
 def insert(_conn, _cur, _list):
-    extras.execute_values(
-        _cur,
-        f"INSERT INTO {psql_table_name} VALUES %s",
-        _list
-    )
+    month = 1
+    for x in _list:
+        table = f'pem_{year}{month:02}'
+        extras.execute_values(
+            _cur,
+            f"INSERT INTO {table} VALUES %s",
+            x
+        )
+        month += 1
     _conn.commit()
 
 def read_stream(_index, _reader):
@@ -61,20 +65,26 @@ def read_stream(_index, _reader):
     # Do any local processing by iterating over the rows. The
     # google-cloud-bigquery-storage client reconnects to the API after any
     # transient network errors or timeouts.
-    insert_list = []
+    insert_list = [[] for i in range(12)]
     i = 0
     for row in rows:
-        fp = row["fingerprint_sha1"]
-        insert_list.append((fp,""))
+        start_dt = row["start"]
+        index = start_dt.month - 1
+        fp = row["fingerprint_sha256"]
+        insert_list[index].append(
+            (fp,"")
+        )
         i += 1
         if batch_size <= i:
             insert(conn, cur, insert_list)
             i = 0
-            insert_list.clear()
+            for x in insert_list:
+                x.clear()
     if i > 0:
         insert(conn, cur, insert_list)
         i = 0
-        insert_list.clear()
+        for x in insert_list:
+            x.clear()
 
     cur.close()
     conn.close()
@@ -89,7 +99,7 @@ def create_read_session():
     s.data_format = types.DataFormat.AVRO
 
     # 出力する列の指定　
-    s.read_options.selected_fields = ["fingerprint_sha1"]
+    s.read_options.selected_fields = ["start", "fingerprint_sha256"]
 
     # 読み込む条件を指定する場合に使う
     #s.read_options.row_restriction = 'state = "WA"'
